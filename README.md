@@ -1,5 +1,7 @@
 # mcp-server-matrix
 
+[![README на русском](https://img.shields.io/badge/README-на_русском-blue)](README.ru.md)
+
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for [Matrix](https://matrix.org) — the open, decentralized communication protocol.
 
 Built on [matrix-nio](https://github.com/matrix-nio/matrix-nio), this server lets any MCP-compatible AI assistant (Claude, OpenClaw, etc.) send and read messages, manage rooms, and interact with any Matrix homeserver (Synapse, Dendrite, Conduit).
