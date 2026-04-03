@@ -10,11 +10,16 @@ Built on [matrix-nio](https://github.com/matrix-nio/matrix-nio), this server let
 
 | Tool | Description |
 |------|-------------|
-| `send_message` | Send a text message to a room |
-| `send_html` | Send an HTML-formatted message |
+| `send_message` | Send a message (text, HTML, or Markdown) with optional reply |
 | `read_messages` | Read recent messages (with pagination) |
+| `get_messages_by_date` | Get messages filtered by date range |
 | `list_rooms` | List all joined rooms |
 | `get_room_info` | Room details — name, topic, members, encryption status |
+| `get_room_members` | List joined members with display names and avatars |
+| `get_notification_counts` | Unread and mention counts per room |
+| `get_direct_messages` | List DM conversations with unread status |
+| `send_direct_message` | Send a DM (auto-creates room if needed) |
+| `get_user_profile` | User profile — display name, avatar |
 | `join_room` | Join a room by ID or alias |
 | `leave_room` | Leave a room |
 | `create_room` | Create a new room (with optional invites) |
