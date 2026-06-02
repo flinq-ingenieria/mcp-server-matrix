@@ -15,6 +15,7 @@ Built on [matrix-nio](https://github.com/matrix-nio/matrix-nio), this server let
 | `read_messages` | Read recent messages or filter by date range (with pagination) |
 | `list_rooms` | List all joined rooms |
 | `get_room_info` | Room details — name, topic, members, encryption status |
+| `get_room_members` | List joined members with display names and avatars |
 | `join_room` | Join a room by ID or alias |
 | `leave_room` | Leave a room |
 | `create_room` | Create a new room (with optional invites) |

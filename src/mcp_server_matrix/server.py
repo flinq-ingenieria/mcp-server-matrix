@@ -399,6 +399,20 @@ TOOLS = [
         },
     ),
     types.Tool(
+        name="get_room_members",
+        description="List joined members of a Matrix room with display names and avatars.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "room_id": {
+                    "type": "string",
+                    "description": "Room ID (e.g. !abc123:matrix.org)",
+                },
+            },
+            "required": ["room_id"],
+        },
+    ),
+    types.Tool(
         name="join_room",
         description="Join a Matrix room by ID or alias.",
         inputSchema={
@@ -748,6 +762,23 @@ async def _get_room_info(client: AsyncClient, args: dict) -> list[types.TextCont
     return _ok(_format_room_info_text(info) + "\n\n" + json.dumps(info, ensure_ascii=False))
 
 
+async def _get_room_members(client: AsyncClient, args: dict) -> list[types.TextContent]:
+    room_id = args["room_id"]
+    resp = await client.joined_members(room_id)
+
+    if isinstance(resp, JoinedMembersResponse):
+        members = []
+        for member in resp.members:
+            members.append({
+                "user_id": getattr(member, "user_id", None),
+                "display_name": getattr(member, "display_name", None),
+                "avatar_url": getattr(member, "avatar_url", None),
+            })
+        return _ok(json.dumps(members, ensure_ascii=False))
+
+    return _error(f"Failed to get members: {resp}")
+
+
 async def _join_room(client: AsyncClient, args: dict) -> list[types.TextContent]:
     target = args["room_id_or_alias"]
     resp = await client.join(target)
@@ -844,6 +875,7 @@ _HANDLERS = {
     "read_messages": _read_messages,
     "list_rooms": _list_rooms,
     "get_room_info": _get_room_info,
+    "get_room_members": _get_room_members,
     "join_room": _join_room,
     "leave_room": _leave_room,
     "create_room": _create_room,
