@@ -32,6 +32,7 @@ from nio import (
     JoinError,
     LoginResponse,
     MessageDirection,
+    SyncResponse,
     RoomCreateResponse,
     RoomInviteResponse,
     RoomMessagesResponse,
@@ -99,7 +100,9 @@ async def _ensure_synced(client: AsyncClient) -> None:
     global _synced
     if _synced:
         return
-    await client.sync(timeout=10000, full_state=True)
+    resp = await client.sync(timeout=10000, full_state=True)
+    if not isinstance(resp, SyncResponse) or not getattr(resp, "next_batch", ""):
+        raise RuntimeError("Matrix sync did not return a usable next_batch token")
     _synced = True
     logger.info("Initial sync complete — %d rooms", len(client.rooms))
 
@@ -166,6 +169,24 @@ async def _resolve_room_id_for_read(
         "Invalid room_id format: expected a room ID (!room:server) "
         "or alias (#room:server)"
     )
+
+
+def _room_prev_batch(room: object | None) -> str | None:
+    """Return the best available pagination token cached for a room."""
+    if room is None:
+        return None
+
+    prev_batch = getattr(room, "prev_batch", None)
+    if prev_batch:
+        return prev_batch
+
+    timeline = getattr(room, "timeline", None)
+    if timeline is not None:
+        prev_batch = getattr(timeline, "prev_batch", None)
+        if prev_batch:
+            return prev_batch
+
+    return None
 # END_BLOCK_HELPERS
 
 
@@ -408,7 +429,11 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         logger.error("Auth error: %s", exc)
         return _error(f"AuthError: {exc}")
 
-    await _ensure_synced(client)
+    if name in {"list_rooms", "get_room_info"}:
+        try:
+            await _ensure_synced(client)
+        except Exception as exc:
+            logger.warning("Sync unavailable for '%s': %s", name, exc)
 
     try:
         handler = _HANDLERS.get(name)
@@ -480,37 +505,9 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
         return _error("Invalid date range: from_date must be before to_date")
 
     room = client.rooms.get(room_id)
-    if room is None:
-        await client.sync(timeout=5000)
-        room = client.rooms.get(room_id)
-
     start_token = since
-    if not start_token and room is not None and hasattr(room, "prev_batch"):
-        start_token = room.prev_batch or ""
-
     if not start_token:
-        await client.sync(timeout=5000)
-        room = client.rooms.get(room_id)
-        if room is not None and hasattr(room, "prev_batch"):
-            start_token = room.prev_batch or ""
-
-    if not start_token:
-        start_token = client.next_batch or ""
-
-    if not start_token:
-        joined = await client.joined_rooms()
-        if isinstance(joined, JoinedRoomsResponse) and room_id not in joined.rooms:
-            return _error(
-                f"Cannot read room {room_id} — bot is not joined to this room"
-            )
-        if isinstance(joined, JoinedRoomsResponse):
-            return _error(
-                f"Cannot read room {room_id} — no sync token available yet; "
-                "retry after a sync or pass `since`"
-            )
-        return _error(
-            f"Cannot read room {room_id} — unable to verify room membership: {joined}"
-        )
+        start_token = _room_prev_batch(room)
 
     messages = []
     page_token = start_token
@@ -520,11 +517,12 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
     seen_tokens: set[str] = set()
 
     while len(messages) < limit:
-        if page_token in seen_tokens:
+        page_key = page_token if page_token is not None else "__start__"
+        if page_key in seen_tokens:
             return _error(
-                f"Failed to read messages from {room_id}: pagination stalled at {page_token}"
+                f"Failed to read messages from {room_id}: pagination stalled at {page_key}"
             )
-        seen_tokens.add(page_token)
+        seen_tokens.add(page_key)
 
         resp = await client.room_messages(
             room_id=room_id,
