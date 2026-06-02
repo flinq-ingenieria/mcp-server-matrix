@@ -526,12 +526,21 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
     start_token = since
     if not start_token:
         room = client.rooms.get(room_id)
-        if room and hasattr(room, "prev_batch"):
-            start_token = room.prev_batch
-        if not start_token:
-            await client.sync(timeout=5000)
-            room = client.rooms.get(room_id)
-            start_token = room.prev_batch if room else ""
+        if room:
+            start_token = (
+                getattr(room, "prev_batch", None)
+                or getattr(room, "timeline_previous_batch", None)
+                or ""
+            )
+    if not start_token:
+        sync_resp = await client.sync(timeout=5000)
+        room = client.rooms.get(room_id)
+        if room:
+            start_token = (
+                getattr(room, "prev_batch", None)
+                or getattr(room, "timeline_previous_batch", None)
+                or ""
+            )
 
     if not start_token:
         return _error(f"Cannot read room {room_id} — not joined or no sync token")
@@ -742,7 +751,12 @@ async def _get_messages_by_date(client: AsyncClient, args: dict) -> list[types.T
         return _error(f"Cannot read room {room_id} — not joined or no sync token")
 
     messages = []
-    token = room.prev_batch
+    token = (
+      getattr(room, "prev_batch", None)
+      or getattr(room, "timeline_previous_batch", None)
+      or ""
+    )
+  
     max_iterations = 20  # safety limit
 
     for _ in range(max_iterations):
