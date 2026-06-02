@@ -283,6 +283,32 @@ async def _room_member_count(client: AsyncClient, room_id: str, room: object | N
             return member_count
 
     return 0
+
+
+def _format_room_line(room: dict) -> str:
+    """Format a room summary line for human-readable tool output."""
+    parts = [f"- {room['display_name']} ({room['room_id']})"]
+    parts.append(f"members: {room['member_count']}")
+    if room.get("canonical_alias"):
+        parts.append(f"alias: {room['canonical_alias']}")
+    if room.get("topic"):
+        parts.append(f"topic: {room['topic']}")
+    return " | ".join(parts)
+
+
+def _format_room_info_text(info: dict) -> str:
+    """Format room details for human-readable tool output."""
+    lines = [
+        f"Room: {info['display_name']}",
+        f"ID: {info['room_id']}",
+        f"Members: {info['member_count']}",
+        f"Alias: {info['canonical_alias'] or '-'}",
+        f"Topic: {info['topic'] or '-'}",
+        f"Encrypted: {'yes' if info['encrypted'] else 'no'}",
+    ]
+    if info.get("members"):
+        lines.append(f"Members list: {', '.join(info['members'])}")
+    return "\n".join(lines)
 # END_BLOCK_HELPERS
 
 
@@ -694,10 +720,16 @@ async def _list_rooms(client: AsyncClient, _args: dict) -> list[types.TextConten
             "room_id": room_id,
             "display_name": await _room_display_name(client, room_id, room),
             "member_count": await _room_member_count(client, room_id, room),
+            "canonical_alias": await _room_canonical_alias(client, room_id, room),
             "topic": await _room_topic(client, room_id, room),
         })
 
-    return _ok(json.dumps(rooms, ensure_ascii=False))
+    rooms.sort(key=lambda room: room["display_name"].lower())
+    lines = ["Rooms:"]
+    lines.extend(_format_room_line(room) for room in rooms)
+    lines.append("")
+    lines.append(json.dumps(rooms, ensure_ascii=False))
+    return _ok("\n".join(lines))
 
 
 async def _get_room_info(client: AsyncClient, args: dict) -> list[types.TextContent]:
@@ -713,7 +745,7 @@ async def _get_room_info(client: AsyncClient, args: dict) -> list[types.TextCont
         "encrypted": room.encrypted if room and hasattr(room, "encrypted") else False,
         "members": await _room_member_ids(client, room_id, room),
     }
-    return _ok(json.dumps(info, ensure_ascii=False))
+    return _ok(_format_room_info_text(info) + "\n\n" + json.dumps(info, ensure_ascii=False))
 
 
 async def _join_room(client: AsyncClient, args: dict) -> list[types.TextContent]:
