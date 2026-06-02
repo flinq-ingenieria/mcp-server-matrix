@@ -12,7 +12,7 @@ Built on [matrix-nio](https://github.com/matrix-nio/matrix-nio), this server let
 |------|-------------|
 | `send_message` | Send a text message to a room |
 | `send_html` | Send an HTML-formatted message |
-| `read_messages` | Read recent messages (with pagination) |
+| `read_messages` | Read recent messages or filter by date range (with pagination) |
 | `list_rooms` | List all joined rooms |
 | `get_room_info` | Room details — name, topic, members, encryption status |
 | `join_room` | Join a room by ID or alias |

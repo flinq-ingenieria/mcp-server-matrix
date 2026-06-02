@@ -123,6 +123,30 @@ def _error(msg: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=f"ERROR: {msg}")]
 
 
+def _parse_datetime_input(value: str, label: str) -> tuple[datetime | None, str | None]:
+    """Parse an ISO 8601 or YYYY-MM-DD datetime string as UTC."""
+    if not isinstance(value, str) or not value.strip():
+        return None, f"Invalid {label}: expected an ISO 8601 datetime or YYYY-MM-DD"
+
+    raw_value = value.strip()
+    parsed: datetime | None = None
+
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw_value, "%Y-%m-%d")
+        except ValueError:
+            return None, (
+                f"Invalid {label}: expected an ISO 8601 datetime or YYYY-MM-DD"
+            )
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc), None
+
+
 async def _resolve_room_id_for_read(
     client: AsyncClient, room_ref: str
 ) -> tuple[str | None, str | None]:
@@ -169,7 +193,8 @@ TOOLS = [
         name="read_messages",
         description=(
             "Read the last N visible messages from a Matrix room using room ID "
-            "or alias. Returns messages in chronological order."
+            "or alias. Returns messages in chronological order. Optional date "
+            "bounds filter the paginated history by event timestamp."
         ),
         inputSchema={
             "type": "object",
@@ -189,6 +214,20 @@ TOOLS = [
                 "since": {
                     "type": "string",
                     "description": "Pagination token from a previous read_messages call",
+                },
+                "from_date": {
+                    "type": "string",
+                    "description": (
+                        "Optional lower bound for message timestamps "
+                        "(ISO 8601 or YYYY-MM-DD)"
+                    ),
+                },
+                "to_date": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound for message timestamps "
+                        "(ISO 8601 or YYYY-MM-DD)"
+                    ),
                 },
             },
             "required": ["room_id"],
@@ -417,6 +456,29 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
         return _error("Invalid since: expected a pagination token string")
     since = since.strip()
 
+    from_date = args.get("from_date", "")
+    to_date = args.get("to_date", "")
+    if from_date is None:
+        from_date = ""
+    if to_date is None:
+        to_date = ""
+    if not isinstance(from_date, str) or not isinstance(to_date, str):
+        return _error("Invalid from_date/to_date: expected ISO 8601 strings")
+
+    from_dt = None
+    to_dt = None
+    if from_date.strip():
+        from_dt, parse_error = _parse_datetime_input(from_date, "from_date")
+        if parse_error:
+            return _error(parse_error)
+    if to_date.strip():
+        to_dt, parse_error = _parse_datetime_input(to_date, "to_date")
+        if parse_error:
+            return _error(parse_error)
+
+    if from_dt and to_dt and from_dt > to_dt:
+        return _error("Invalid date range: from_date must be before to_date")
+
     room = client.rooms.get(room_id)
     if room is None:
         await client.sync(timeout=5000)
@@ -450,39 +512,84 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
             f"Cannot read room {room_id} — unable to verify room membership: {joined}"
         )
 
-    resp = await client.room_messages(
-        room_id=room_id,
-        start=start_token,
-        limit=limit,
-        direction=MessageDirection.back,
-    )
-
-    if not isinstance(resp, RoomMessagesResponse):
-        return _error(f"Failed to read messages from {room_id}: {resp}")
-
     messages = []
-    for event in resp.chunk:
-        if hasattr(event, "body"):
-            event_ts = getattr(event, "server_timestamp", None)
-            if event_ts is not None:
-                ts = datetime.fromtimestamp(event_ts / 1000, tz=timezone.utc).isoformat()
-            else:
-                ts = None
-            messages.append({
-                "sender": event.sender,
-                "timestamp": ts,
-                "body": event.body,
-                "event_id": event.event_id,
-            })
+    page_token = start_token
+    next_token = start_token
+    completed = False
+    page_limit = min(100, max(20, limit * 2))
+    seen_tokens: set[str] = set()
 
-    # /messages with dir=back returns reverse chronological order.
-    messages.reverse()
+    while len(messages) < limit:
+        if page_token in seen_tokens:
+            return _error(
+                f"Failed to read messages from {room_id}: pagination stalled at {page_token}"
+            )
+        seen_tokens.add(page_token)
+
+        resp = await client.room_messages(
+            room_id=room_id,
+            start=page_token,
+            limit=page_limit,
+            direction=MessageDirection.back,
+        )
+
+        if not isinstance(resp, RoomMessagesResponse):
+            return _error(f"Failed to read messages from {room_id}: {resp}")
+
+        page_messages = []
+        hit_lower_bound = False
+        for event in resp.chunk:
+            if hasattr(event, "body"):
+                event_ts = getattr(event, "server_timestamp", None)
+                if event_ts is None:
+                    continue
+
+                event_dt = datetime.fromtimestamp(event_ts / 1000, tz=timezone.utc)
+
+                if to_dt and event_dt > to_dt:
+                    continue
+                if from_dt and event_dt < from_dt:
+                    completed = True
+                    hit_lower_bound = True
+                    break
+
+                page_messages.append({
+                    "sender": event.sender,
+                    "timestamp": event_dt.isoformat(),
+                    "timestamp_ms": event_ts,
+                    "body": event.body,
+                    "event_id": event.event_id,
+                })
+
+        # /messages with dir=back returns reverse chronological order.
+        page_messages.reverse()
+        messages = page_messages + messages
+        next_token = resp.end
+
+        if hit_lower_bound:
+            break
+        if not next_token or next_token == page_token:
+            completed = True
+            break
+
+        page_token = next_token
 
     return _ok(json.dumps({
-        "messages": messages,
-        "count": len(messages),
-        "next_token": resp.end,
+        "messages": [
+            {
+                "sender": message["sender"],
+                "timestamp": message["timestamp"],
+                "body": message["body"],
+                "event_id": message["event_id"],
+            }
+            for message in messages[-limit:]
+        ],
+        "count": min(len(messages), limit),
+        "next_token": next_token,
+        "completed": completed,
         "room_id_resolved": room_id,
+        "from_date": from_dt.isoformat() if from_dt else None,
+        "to_date": to_dt.isoformat() if to_dt else None,
     }, ensure_ascii=False))
 
 
