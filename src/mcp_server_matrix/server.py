@@ -121,6 +121,27 @@ def _ok(text: str) -> list[types.TextContent]:
 
 def _error(msg: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=f"ERROR: {msg}")]
+
+
+async def _resolve_room_id_for_read(
+    client: AsyncClient, room_ref: str
+) -> tuple[str | None, str | None]:
+    """Resolve a room identifier to a room ID for read operations."""
+    if not isinstance(room_ref, str) or not room_ref.strip():
+        return None, "Invalid room_id: expected a non-empty string"
+
+    value = room_ref.strip()
+    if value.startswith("!"):
+        return value, None
+    if value.startswith("#"):
+        resp = await client.room_resolve_alias(value)
+        if isinstance(resp, RoomResolveAliasResponse):
+            return resp.room_id, None
+        return None, f"Cannot resolve alias {value}: {resp}"
+    return None, (
+        "Invalid room_id format: expected a room ID (!room:server) "
+        "or alias (#room:server)"
+    )
 # END_BLOCK_HELPERS
 
 
@@ -146,17 +167,23 @@ TOOLS = [
     ),
     types.Tool(
         name="read_messages",
-        description="Read recent messages from a Matrix room. Returns messages in reverse chronological order.",
+        description=(
+            "Read the last N visible messages from a Matrix room using room ID "
+            "or alias. Returns messages in chronological order."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "room_id": {
                     "type": "string",
-                    "description": "Room ID (e.g. !abc123:matrix.org)",
+                    "description": (
+                        "Room ID (e.g. !abc123:matrix.org) or alias "
+                        "(e.g. #room:matrix.org)"
+                    ),
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max messages to return (default 20, max 100)",
+                    "description": "Number of messages to return (1-100, default 20)",
                     "default": 20,
                 },
                 "since": {
@@ -372,22 +399,56 @@ async def _send_message(client: AsyncClient, args: dict) -> list[types.TextConte
 
 
 async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextContent]:
-    room_id = args["room_id"]
-    limit = min(args.get("limit", 20), 100)
+    room_ref = args["room_id"]
+    room_id, resolve_error = await _resolve_room_id_for_read(client, room_ref)
+    if resolve_error:
+        return _error(resolve_error)
+
+    limit = args.get("limit", 20)
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        return _error("Invalid limit: expected an integer between 1 and 100")
+    if limit < 1 or limit > 100:
+        return _error("Invalid limit: must be between 1 and 100")
+
     since = args.get("since", "")
+    if since is None:
+        since = ""
+    if not isinstance(since, str):
+        return _error("Invalid since: expected a pagination token string")
+    since = since.strip()
+
+    room = client.rooms.get(room_id)
+    if room is None:
+        await client.sync(timeout=5000)
+        room = client.rooms.get(room_id)
 
     start_token = since
-    if not start_token:
-        room = client.rooms.get(room_id)
-        if room and hasattr(room, "prev_batch"):
-            start_token = room.prev_batch
-        if not start_token:
-            await client.sync(timeout=5000)
-            room = client.rooms.get(room_id)
-            start_token = room.prev_batch if room else ""
+    if not start_token and room is not None and hasattr(room, "prev_batch"):
+        start_token = room.prev_batch or ""
 
     if not start_token:
-        return _error(f"Cannot read room {room_id} — not joined or no sync token")
+        await client.sync(timeout=5000)
+        room = client.rooms.get(room_id)
+        if room is not None and hasattr(room, "prev_batch"):
+            start_token = room.prev_batch or ""
+
+    if not start_token:
+        start_token = client.next_batch or ""
+
+    if not start_token:
+        joined = await client.joined_rooms()
+        if isinstance(joined, JoinedRoomsResponse) and room_id not in joined.rooms:
+            return _error(
+                f"Cannot read room {room_id} — bot is not joined to this room"
+            )
+        if isinstance(joined, JoinedRoomsResponse):
+            return _error(
+                f"Cannot read room {room_id} — no sync token available yet; "
+                "retry after a sync or pass `since`"
+            )
+        return _error(
+            f"Cannot read room {room_id} — unable to verify room membership: {joined}"
+        )
 
     resp = await client.room_messages(
         room_id=room_id,
@@ -397,14 +458,16 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
     )
 
     if not isinstance(resp, RoomMessagesResponse):
-        return _error(f"Failed to read messages: {resp}")
+        return _error(f"Failed to read messages from {room_id}: {resp}")
 
     messages = []
     for event in resp.chunk:
         if hasattr(event, "body"):
-            ts = datetime.fromtimestamp(
-                event.server_timestamp / 1000, tz=timezone.utc
-            ).isoformat()
+            event_ts = getattr(event, "server_timestamp", None)
+            if event_ts is not None:
+                ts = datetime.fromtimestamp(event_ts / 1000, tz=timezone.utc).isoformat()
+            else:
+                ts = None
             messages.append({
                 "sender": event.sender,
                 "timestamp": ts,
@@ -412,10 +475,14 @@ async def _read_messages(client: AsyncClient, args: dict) -> list[types.TextCont
                 "event_id": event.event_id,
             })
 
+    # /messages with dir=back returns reverse chronological order.
+    messages.reverse()
+
     return _ok(json.dumps({
         "messages": messages,
         "count": len(messages),
         "next_token": resp.end,
+        "room_id_resolved": room_id,
     }, ensure_ascii=False))
 
 
