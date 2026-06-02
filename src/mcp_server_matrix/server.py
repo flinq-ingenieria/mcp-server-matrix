@@ -28,12 +28,14 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from nio import (
     AsyncClient,
+    JoinedMembersResponse,
     JoinedRoomsResponse,
     JoinError,
     LoginResponse,
     MessageDirection,
     SyncResponse,
     RoomCreateResponse,
+    RoomGetStateEventResponse,
     RoomInviteResponse,
     RoomMessagesResponse,
     RoomResolveAliasResponse,
@@ -187,6 +189,100 @@ def _room_prev_batch(room: object | None) -> str | None:
             return prev_batch
 
     return None
+
+
+async def _room_state_content(
+    client: AsyncClient, room_id: str, event_type: str
+) -> dict | None:
+    """Fetch a state event content dict directly from the homeserver."""
+    resp = await client.room_get_state_event(room_id, event_type)
+    if isinstance(resp, RoomGetStateEventResponse):
+        return resp.content
+    return None
+
+
+async def _room_display_name(client: AsyncClient, room_id: str, room: object | None) -> str:
+    """Resolve a human-friendly room name with server-backed fallbacks."""
+    if room is not None:
+        display_name = getattr(room, "display_name", None)
+        if display_name and display_name != room_id:
+            return display_name
+
+    name_content = await _room_state_content(client, room_id, "m.room.name")
+    if name_content:
+        name = name_content.get("name")
+        if name:
+            return name
+
+    alias = await _room_canonical_alias(client, room_id, room)
+    if alias:
+        return alias
+
+    if room is not None:
+        display_name = getattr(room, "display_name", None)
+        if display_name:
+            return display_name
+
+    return room_id
+
+
+async def _room_topic(client: AsyncClient, room_id: str, room: object | None) -> str | None:
+    """Resolve the room topic from state, with cache fallback."""
+    topic_content = await _room_state_content(client, room_id, "m.room.topic")
+    if topic_content:
+        topic = topic_content.get("topic")
+        if topic:
+            return topic
+
+    if room is not None:
+        return getattr(room, "topic", None)
+
+    return None
+
+
+async def _room_canonical_alias(
+    client: AsyncClient, room_id: str, room: object | None
+) -> str | None:
+    """Resolve the canonical alias from state, with cache fallback."""
+    alias_content = await _room_state_content(client, room_id, "m.room.canonical_alias")
+    if alias_content:
+        alias = alias_content.get("alias")
+        if alias:
+            return alias
+
+    if room is not None:
+        return getattr(room, "canonical_alias", None)
+
+    return None
+
+
+async def _room_member_ids(client: AsyncClient, room_id: str, room: object | None) -> list[str]:
+    """Get joined member ids directly from the homeserver, with cache fallback."""
+    resp = await client.joined_members(room_id)
+    if isinstance(resp, JoinedMembersResponse):
+        return [member.user_id for member in resp.members]
+
+    if room is not None and hasattr(room, "users"):
+        return [member_id for member_id in room.users]
+
+    return []
+
+
+async def _room_member_count(client: AsyncClient, room_id: str, room: object | None) -> int:
+    """Get the joined member count directly from the homeserver."""
+    members = await _room_member_ids(client, room_id, room)
+    if members:
+        return len(members)
+
+    if room is not None:
+        joined_count = getattr(room, "joined_count", None)
+        if isinstance(joined_count, int):
+            return joined_count
+        member_count = getattr(room, "member_count", None)
+        if isinstance(member_count, int):
+            return member_count
+
+    return 0
 # END_BLOCK_HELPERS
 
 
@@ -429,12 +525,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         logger.error("Auth error: %s", exc)
         return _error(f"AuthError: {exc}")
 
-    if name in {"list_rooms", "get_room_info"}:
-        try:
-            await _ensure_synced(client)
-        except Exception as exc:
-            logger.warning("Sync unavailable for '%s': %s", name, exc)
-
     try:
         handler = _HANDLERS.get(name)
         if handler is None:
@@ -602,9 +692,9 @@ async def _list_rooms(client: AsyncClient, _args: dict) -> list[types.TextConten
         room = client.rooms.get(room_id)
         rooms.append({
             "room_id": room_id,
-            "display_name": room.display_name if room else room_id,
-            "member_count": room.member_count if room else 0,
-            "topic": room.topic if room and hasattr(room, "topic") else None,
+            "display_name": await _room_display_name(client, room_id, room),
+            "member_count": await _room_member_count(client, room_id, room),
+            "topic": await _room_topic(client, room_id, room),
         })
 
     return _ok(json.dumps(rooms, ensure_ascii=False))
@@ -614,17 +704,14 @@ async def _get_room_info(client: AsyncClient, args: dict) -> list[types.TextCont
     room_id = args["room_id"]
     room = client.rooms.get(room_id)
 
-    if not room:
-        return _error(f"Room {room_id} not found — bot may not have joined it")
-
     info = {
         "room_id": room_id,
-        "display_name": room.display_name,
-        "topic": room.topic if hasattr(room, "topic") else None,
-        "member_count": room.member_count,
-        "canonical_alias": room.canonical_alias if hasattr(room, "canonical_alias") else None,
-        "encrypted": room.encrypted if hasattr(room, "encrypted") else False,
-        "members": [m for m in room.users] if hasattr(room, "users") else [],
+        "display_name": await _room_display_name(client, room_id, room),
+        "topic": await _room_topic(client, room_id, room),
+        "member_count": await _room_member_count(client, room_id, room),
+        "canonical_alias": await _room_canonical_alias(client, room_id, room),
+        "encrypted": room.encrypted if room and hasattr(room, "encrypted") else False,
+        "members": await _room_member_ids(client, room_id, room),
     }
     return _ok(json.dumps(info, ensure_ascii=False))
 
