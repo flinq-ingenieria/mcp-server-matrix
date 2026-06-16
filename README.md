@@ -6,6 +6,8 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for [Ma
 
 Built on [matrix-nio](https://github.com/matrix-nio/matrix-nio), this server lets any MCP-compatible AI assistant (Claude, OpenClaw, etc.) send and read messages, manage rooms, and interact with any Matrix homeserver (Synapse, Dendrite, Conduit).
 
+Room aliases such as `#general:matrix.org` are currently supported by `read_messages`, `join_room`, and `resolve_alias`. Other tools expect a resolved room ID such as `!abc123:matrix.org`.
+
 ## Features
 
 | Tool | Description |
@@ -123,10 +125,11 @@ mcp-server-matrix
 
 Once connected, your AI assistant can:
 
-- **Read messages**: "What are the latest messages in #general?"
-- **Send messages**: "Send 'Hello everyone!' to #announcements"
+- **Read messages**: "What are the latest messages in #general:matrix.org?"
+- **Resolve an alias before writing**: "Resolve #announcements:matrix.org to a room ID"
+- **Send messages**: "Send 'Hello everyone!' to !abc123:matrix.org"
 - **Manage rooms**: "Create a room called 'Project X' and invite @alice:matrix.org"
-- **Get info**: "How many members are in #team-chat?"
+- **Get info**: "How many members are in !abc123:matrix.org?"
 
 ## Supported Homeservers
 
