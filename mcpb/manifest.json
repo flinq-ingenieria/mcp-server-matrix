@@ -1,0 +1,95 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "mcp-server-matrix",
+  "display_name": "Matrix MCP Server",
+  "version": "0.3.0",
+  "description": "MCP server for Matrix messaging and room management",
+  "long_description": "Interact with Matrix homeservers over stdio MCP. Send and read messages, manage rooms, invite users, resolve aliases, and inspect room state through a single local server.",
+  "author": {
+    "name": "Flinq Ingenieria"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flinq-ingenieria/mcp-server-matrix.git"
+  },
+  "homepage": "https://github.com/flinq-ingenieria/mcp-server-matrix",
+  "documentation": "https://github.com/flinq-ingenieria/mcp-server-matrix#readme",
+  "support": "https://github.com/flinq-ingenieria/mcp-server-matrix/issues",
+  "keywords": ["matrix", "mcp", "chat", "rooms", "matrix-nio"],
+  "license": "MIT",
+  "server": {
+    "type": "uv",
+    "entry_point": "src/mcp_server_matrix/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "mcp-server-matrix"],
+      "env": {
+        "MATRIX_HOMESERVER": "${user_config.matrixHomeserver}",
+        "MATRIX_USER": "${user_config.matrixUser}",
+        "MATRIX_PASSWORD": "${user_config.matrixPassword}",
+        "MATRIX_ACCESS_TOKEN": "${user_config.matrixAccessToken}",
+        "MATRIX_STORE_PATH": "${user_config.matrixStorePath}",
+        "MCP_LOG_LEVEL": "${user_config.mcpLogLevel}"
+      }
+    }
+  },
+  "user_config": {
+    "matrixHomeserver": {
+      "type": "string",
+      "title": "Homeserver URL",
+      "description": "Matrix homeserver URL, for example https://matrix.org.",
+      "required": true
+    },
+    "matrixUser": {
+      "type": "string",
+      "title": "Matrix user ID",
+      "description": "Full Matrix user ID, for example @bot:example.com.",
+      "required": true
+    },
+    "matrixPassword": {
+      "type": "string",
+      "title": "Password",
+      "description": "Account password. Provide this or an access token.",
+      "sensitive": true
+    },
+    "matrixAccessToken": {
+      "type": "string",
+      "title": "Access token",
+      "description": "Account access token. Provide this or a password.",
+      "sensitive": true
+    },
+    "matrixStorePath": {
+      "type": "directory",
+      "title": "Store path",
+      "description": "Optional path for the nio session store.",
+      "default": "${HOME}/.mcp-server-matrix/nio_store"
+    },
+    "mcpLogLevel": {
+      "type": "string",
+      "title": "Log level",
+      "description": "Process log level.",
+      "default": "INFO"
+    }
+  },
+  "tools": [
+    {"name": "send_message", "description": "Send a text message to a room."},
+    {"name": "send_html", "description": "Send an HTML-formatted message to a room."},
+    {"name": "read_messages", "description": "Read recent room messages with optional date filters and pagination."},
+    {"name": "list_rooms", "description": "List all joined rooms."},
+    {"name": "get_room_info", "description": "Get room details including name, topic, members, and encryption status."},
+    {"name": "get_room_members", "description": "List joined members with display names and avatars."},
+    {"name": "join_room", "description": "Join a room by ID or alias."},
+    {"name": "leave_room", "description": "Leave a room."},
+    {"name": "create_room", "description": "Create a new room with optional invites."},
+    {"name": "invite_user", "description": "Invite a user to a room."},
+    {"name": "send_reaction", "description": "React to a message with an emoji."},
+    {"name": "resolve_alias", "description": "Resolve a Matrix room alias to a room ID."}
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}
