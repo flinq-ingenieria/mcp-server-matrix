@@ -20,6 +20,7 @@ MODULE_CONTRACT:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -41,6 +42,7 @@ from nio import (
     RoomMessagesResponse,
     RoomResolveAliasResponse,
     RoomSendResponse,
+    WhoamiResponse,
 )
 # END_BLOCK_IMPORTS
 
@@ -54,10 +56,13 @@ async def _get_client() -> AsyncClient:
     """Return an authenticated AsyncClient, caching across calls.
 
     Reads configuration from environment variables:
-        MATRIX_HOMESERVER  — e.g. https://matrix.example.com
-        MATRIX_USER        — full user ID, e.g. @bot:example.com
-        MATRIX_PASSWORD    — account password
+        MATRIX_HOMESERVER   — e.g. https://matrix.example.com
+        MATRIX_USER         — full user ID, e.g. @bot:example.com
+        MATRIX_PASSWORD     — account password
         MATRIX_ACCESS_TOKEN — (optional) use token instead of password login
+        MATRIX_DEVICE_ID    — (optional) device ID for an access token
+        MATRIX_DEVICE_NAME  — (optional) device name for password logins
+        MATRIX_STORE_PATH   — (optional) persistent nio store / session dir
     """
     global _client
 
@@ -68,6 +73,8 @@ async def _get_client() -> AsyncClient:
     user = os.environ.get("MATRIX_USER", "")
     password = os.environ.get("MATRIX_PASSWORD", "")
     access_token = os.environ.get("MATRIX_ACCESS_TOKEN", "")
+    device_id = os.environ.get("MATRIX_DEVICE_ID", "").strip()
+    device_name = os.environ.get("MATRIX_DEVICE_NAME", "").strip() or "mcp-server-matrix"
 
     if not homeserver:
         raise EnvironmentError("MATRIX_HOMESERVER is not set")
@@ -87,14 +94,63 @@ async def _get_client() -> AsyncClient:
     if access_token:
         client.access_token = access_token
         client.user_id = user
-    else:
-        resp = await client.login(password=password, device_name="mcp-server-matrix")
+        if device_id:
+            client.device_id = device_id
+    elif not await _restore_session(client, store_path, homeserver, user):
+        resp = await client.login(password=password, device_name=device_name)
         if not isinstance(resp, LoginResponse):
             raise RuntimeError(f"Matrix login failed: {resp}")
         logger.info("Logged in as %s (device %s)", resp.user_id, resp.device_id)
+        _save_session(store_path, homeserver, user, resp.device_id, resp.access_token)
 
     _client = client
     return _client
+
+
+# Password logins create a new Matrix device each time. When the server is
+# restarted often (e.g. one process per user behind a gateway), reuse the
+# session from the previous login instead of piling up devices.
+_SESSION_FILE = "session.json"
+
+
+async def _restore_session(
+    client: AsyncClient, store_path: str, homeserver: str, user: str
+) -> bool:
+    path = Path(store_path) / _SESSION_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if data.get("homeserver") != homeserver or data.get("user") != user:
+        return False
+    client.access_token = data.get("access_token", "")
+    client.user_id = user
+    client.device_id = data.get("device_id", "")
+    resp = await client.whoami()
+    if isinstance(resp, WhoamiResponse) and resp.user_id == user:
+        logger.info("Reusing Matrix session for %s (device %s)", user, client.device_id)
+        return True
+    logger.info("Stored Matrix session is no longer valid; logging in again")
+    client.access_token = ""
+    return False
+
+
+def _save_session(
+    store_path: str, homeserver: str, user: str, device_id: str, access_token: str
+) -> None:
+    path = Path(store_path) / _SESSION_FILE
+    payload = {
+        "homeserver": homeserver,
+        "user": user,
+        "device_id": device_id,
+        "access_token": access_token,
+    }
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+    except OSError as exc:
+        logger.warning("Could not save Matrix session: %s", exc)
 
 
 # Sync filter: only fetch the state events we need for room search and
@@ -120,9 +176,30 @@ _SYNC_FILTER: dict = {
 }
 
 
+ROOM_CACHE_TTL = 30 * 60  # seconds before an incremental sync refreshes the room list
+_synced_at: float | None = None
+
+
 async def _ensure_synced(client: AsyncClient) -> None:
-    """Populate the room cache if empty. Checks client.rooms directly — no shared state."""
+    """Populate the room cache, refreshing it incrementally when it is stale.
+
+    A long-running server would otherwise never see rooms joined after its
+    first sync.
+    """
+    global _synced_at
+    now = monotonic()
     if client.rooms:
+        if _synced_at is None:
+            _synced_at = now  # rooms came from a sync we did not time; start the clock
+        if now - _synced_at < ROOM_CACHE_TTL:
+            return
+        since = getattr(client, "next_batch", None) or None
+        resp = await client.sync(timeout=0, since=since, sync_filter=_SYNC_FILTER)
+        if isinstance(resp, SyncResponse):
+            _synced_at = now
+            logger.debug("Room cache refreshed — %d rooms", len(client.rooms))
+        else:
+            logger.warning("Incremental sync failed: %s", resp)
         return
     resp = await client.sync(timeout=0, sync_filter=_SYNC_FILTER)
     if not isinstance(resp, SyncResponse) or not getattr(resp, "next_batch", ""):
@@ -130,6 +207,7 @@ async def _ensure_synced(client: AsyncClient) -> None:
         resp = await client.sync(timeout=30000, sync_filter=_SYNC_FILTER)
     if not isinstance(resp, SyncResponse) or not getattr(resp, "next_batch", ""):
         raise RuntimeError("Matrix sync did not return a usable next_batch token")
+    _synced_at = now
     logger.info("Room cache populated — %d rooms", len(client.rooms))
 
 

@@ -47,36 +47,23 @@ Set environment variables:
 | `MATRIX_PASSWORD` | Yes* | Account password |
 | `MATRIX_ACCESS_TOKEN` | Yes* | Access token (alternative to password) |
 | `MATRIX_STORE_PATH` | No | Path for nio session store (default: `~/.mcp-server-matrix/nio_store/`) |
+| `MATRIX_DEVICE_ID` | No | Device ID to use with `MATRIX_ACCESS_TOKEN` |
+| `MATRIX_DEVICE_NAME` | No | Device name for password logins (default `mcp-server-matrix`) |
 | `MCP_LOG_LEVEL` | No | Log level: DEBUG, INFO, WARNING, ERROR (default: INFO) |
 
 \* Provide either `MATRIX_PASSWORD` or `MATRIX_ACCESS_TOKEN`.
 
-## Remote HTTP mode
+With a password, the server stores the resulting session in
+`MATRIX_STORE_PATH/session.json` (mode 0600) and reuses it on the next start,
+so restarts do not add a new device to the account. Keep that directory
+persistent and private.
 
-The repository now also ships a dedicated Streamable HTTP entrypoint for
-multiuser remote connectors:
+## Remote multi-user mode
 
-```bash
-PYTHONPATH=src python -m mcp_server_matrix.http_server --host 0.0.0.0 --port 8080 --path /mcp
-```
-
-Required runtime configuration for HTTP mode:
-
-| Variable | Description |
-|----------|-------------|
-| `MATRIX_MCP_AUTH_ISSUER_URL` | OAuth issuer URL |
-| `MATRIX_MCP_AUTH_INTROSPECTION_URL` | RFC 7662 introspection endpoint |
-| `MATRIX_MCP_AUTH_RESOURCE_URL` | Canonical public MCP URL, e.g. `https://matrix-mcp.example.com/mcp` |
-| `MATRIX_MCP_AUTH_REQUIRED_SCOPES` | Optional comma-separated scopes, e.g. `mcp:matrix` |
-| `MATRIX_MCP_AUTH_CLIENT_ID` / `MATRIX_MCP_AUTH_CLIENT_SECRET` | Optional credentials for a dedicated backend introspection client |
-| `MATRIX_MCP_CONTROL_PLANE_URL` | Base URL of the shared control-plane |
-| `MATRIX_MCP_CONTROL_PLANE_TOKEN` | Internal service token used against the control-plane |
-| `MATRIX_MCP_STORE_ROOT` | Optional persistent root for per-user nio stores |
-| `MATRIX_MCP_AUDIT_LOG` | Optional JSONL audit log path |
-
-In HTTP mode the server does not read `MATRIX_HOMESERVER`, `MATRIX_USER`, or
-local credentials from the environment. Those are resolved per OAuth subject
-from the control-plane instead.
+At Flinq this server runs unmodified over stdio behind `mcp-gateway`
+(MCP monorepo), which authenticates users with Keycloak, loads each user's
+Matrix credentials from the control plane and starts one process per user
+with the variables above.
 
 ## Usage
 
