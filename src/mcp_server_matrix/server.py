@@ -478,9 +478,20 @@ def _format_message_line(sender: str, ts_ms: int, body: str) -> str:
 
 
 # START_BLOCK_TOOLS
+# Annotations let clients tell reads from writes (e.g. skip confirmation for reads).
+READ_ONLY_TOOL = types.ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+WRITE_TOOL = types.ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
+MARK_READ_TOOL = types.ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
 TOOLS = [
     types.Tool(
         name="send_message",
+        annotations=WRITE_TOOL,
         description="Send a text message to a Matrix room.",
         inputSchema={
             "type": "object",
@@ -499,6 +510,7 @@ TOOLS = [
     ),
     types.Tool(
         name="read_messages",
+        annotations=READ_ONLY_TOOL,
         description=(
             "Read messages from a Matrix room in chronological order. "
             "The room can be identified by ID, alias, or any substring of its name. "
@@ -539,6 +551,7 @@ TOOLS = [
     ),
     types.Tool(
         name="search_messages",
+        annotations=READ_ONLY_TOOL,
         description=(
             "Search for messages containing a keyword or phrase in a room's history. "
             "Use this to check if something was mentioned, find a decision, or locate a specific conversation. "
@@ -574,6 +587,7 @@ TOOLS = [
     ),
     types.Tool(
         name="search_rooms",
+        annotations=READ_ONLY_TOOL,
         description=(
             "Search joined Matrix rooms by name, alias, or topic. "
             "Returns matching rooms so the user can confirm which one to use. "
@@ -597,6 +611,7 @@ TOOLS = [
     ),
     types.Tool(
         name="list_rooms",
+        annotations=READ_ONLY_TOOL,
         description=(
             "List Matrix rooms the user has joined, alphabetically. "
             "Use search_rooms instead when looking for a specific room."
@@ -619,6 +634,7 @@ TOOLS = [
     ),
     types.Tool(
         name="get_room_info",
+        annotations=READ_ONLY_TOOL,
         description="Get details about a Matrix room: name, topic, member count, alias.",
         inputSchema={
             "type": "object",
@@ -633,6 +649,7 @@ TOOLS = [
     ),
     types.Tool(
         name="get_room_members",
+        annotations=READ_ONLY_TOOL,
         description="List the members of a Matrix room.",
         inputSchema={
             "type": "object",
@@ -647,6 +664,7 @@ TOOLS = [
     ),
     types.Tool(
         name="send_reaction",
+        annotations=WRITE_TOOL,
         description="Send an emoji reaction to a specific message in a Matrix room.",
         inputSchema={
             "type": "object",
@@ -669,6 +687,7 @@ TOOLS = [
     ),
     types.Tool(
         name="list_unread_rooms",
+        annotations=READ_ONLY_TOOL,
         description=(
             "List rooms with unread messages for the user, with unread and mention counts. "
             "Use this first when the user asks what is new or unread (e.g. while driving), "
@@ -693,6 +712,7 @@ TOOLS = [
     ),
     types.Tool(
         name="read_unread_messages",
+        annotations=READ_ONLY_TOOL,
         description=(
             "Read the user's unread Matrix messages, grouped by room, oldest first, as "
             "plain text suitable for reading aloud. Optionally restrict to one room. "
@@ -721,6 +741,7 @@ TOOLS = [
     ),
     types.Tool(
         name="mark_room_read",
+        annotations=MARK_READ_TOOL,
         description=(
             "Mark everything in a Matrix room as read for the user (moves the read marker "
             "and read receipt to the latest message). Only call this when the user asks."
