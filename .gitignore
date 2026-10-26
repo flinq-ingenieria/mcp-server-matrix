@@ -13,3 +13,4 @@ nio_store/
 *.log
 .mypy_cache/
 .ruff_cache/
+.pytest_cache/

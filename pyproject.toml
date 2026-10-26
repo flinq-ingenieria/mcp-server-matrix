@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-matrix"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP server for Matrix — interact with Matrix homeservers via Model Context Protocol"
 readme = "README.md"
 license = {text = "MIT"}
@@ -26,7 +26,8 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "httpx>=0.27",
+    "mcp>=1.27,<2",
     "matrix-nio>=0.24.0",
 ]
 

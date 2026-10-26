@@ -6,35 +6,34 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for [Ma
 
 Built on [matrix-nio](https://github.com/matrix-nio/matrix-nio), this server lets any MCP-compatible AI assistant (Claude, OpenClaw, etc.) send and read messages, manage rooms, and interact with any Matrix homeserver (Synapse, Dendrite, Conduit).
 
-Room aliases such as `#general:matrix.org` are currently supported by `read_messages`, `join_room`, and `resolve_alias`. Other tools expect a resolved room ID such as `!abc123:matrix.org`.
-
 ## Features
 
 | Tool | Description |
 |------|-------------|
 | `send_message` | Send a text message to a room |
-| `send_html` | Send an HTML-formatted message |
-| `read_messages` | Read recent messages or filter by date range (with pagination) |
-| `list_rooms` | List all joined rooms |
+| `read_messages` | Read messages in chronological order, with date filters and pagination |
+| `search_messages` | Find messages containing a keyword in a room's history |
+| `list_rooms` | List joined rooms, alphabetically and paginated |
+| `search_rooms` | Find joined rooms by name, alias or topic |
 | `get_room_info` | Room details — name, topic, members, encryption status |
-| `get_room_members` | List joined members with display names and avatars |
-| `join_room` | Join a room by ID or alias |
-| `leave_room` | Leave a room |
-| `create_room` | Create a new room (with optional invites) |
-| `invite_user` | Invite a user to a room |
+| `get_room_members` | List joined members with display names |
 | `send_reaction` | React to a message with an emoji |
-| `resolve_alias` | Resolve `#alias:server` to a room ID |
+| `list_unread_rooms` | Rooms with unread messages, with unread and mention counts |
+| `read_unread_messages` | Unread messages grouped by room, oldest first (optionally one room or mentions only) |
+| `mark_room_read` | Move the read marker and receipt to the latest message of a room |
+
+Rooms can be given as an ID (`!abc:server`), an alias (`#room:server`) or any
+substring of the room name.
+
+Unread state comes from the homeserver's `GET /_matrix/client/v3/notifications`,
+so it follows the user's notification settings (muted rooms are not counted)
+and is accurate at request time. Messages in end-to-end encrypted rooms are
+listed but cannot be read by this connector.
 
 ## Installation
 
 ```bash
-pip install mcp-server-matrix
-```
-
-Or with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uvx mcp-server-matrix
+pip install -r requirements.txt
 ```
 
 ## Configuration
@@ -52,6 +51,33 @@ Set environment variables:
 
 \* Provide either `MATRIX_PASSWORD` or `MATRIX_ACCESS_TOKEN`.
 
+## Remote HTTP mode
+
+The repository now also ships a dedicated Streamable HTTP entrypoint for
+multiuser remote connectors:
+
+```bash
+PYTHONPATH=src python -m mcp_server_matrix.http_server --host 0.0.0.0 --port 8080 --path /mcp
+```
+
+Required runtime configuration for HTTP mode:
+
+| Variable | Description |
+|----------|-------------|
+| `MATRIX_MCP_AUTH_ISSUER_URL` | OAuth issuer URL |
+| `MATRIX_MCP_AUTH_INTROSPECTION_URL` | RFC 7662 introspection endpoint |
+| `MATRIX_MCP_AUTH_RESOURCE_URL` | Canonical public MCP URL, e.g. `https://matrix-mcp.example.com/mcp` |
+| `MATRIX_MCP_AUTH_REQUIRED_SCOPES` | Optional comma-separated scopes, e.g. `mcp:matrix` |
+| `MATRIX_MCP_AUTH_CLIENT_ID` / `MATRIX_MCP_AUTH_CLIENT_SECRET` | Optional credentials for a dedicated backend introspection client |
+| `MATRIX_MCP_CONTROL_PLANE_URL` | Base URL of the shared control-plane |
+| `MATRIX_MCP_CONTROL_PLANE_TOKEN` | Internal service token used against the control-plane |
+| `MATRIX_MCP_STORE_ROOT` | Optional persistent root for per-user nio stores |
+| `MATRIX_MCP_AUDIT_LOG` | Optional JSONL audit log path |
+
+In HTTP mode the server does not read `MATRIX_HOMESERVER`, `MATRIX_USER`, or
+local credentials from the environment. Those are resolved per OAuth subject
+from the control-plane instead.
+
 ## Usage
 
 ### Claude Desktop
@@ -62,8 +88,10 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "matrix": {
-      "command": "mcp-server-matrix",
+      "command": "python3",
+      "args": ["-m", "mcp_server_matrix.server"],
       "env": {
+        "PYTHONPATH": "/absolute/path/to/mcp-matrix/src",
         "MATRIX_HOMESERVER": "https://matrix.example.com",
         "MATRIX_USER": "@bot:example.com",
         "MATRIX_PASSWORD": "your-password"
@@ -79,8 +107,10 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "matrix": {
-      "command": "mcp-server-matrix",
+      "command": "python3",
+      "args": ["-m", "mcp_server_matrix.server"],
       "env": {
+        "PYTHONPATH": "/absolute/path/to/mcp-matrix/src",
         "MATRIX_HOMESERVER": "https://matrix.example.com",
         "MATRIX_USER": "@bot:example.com",
         "MATRIX_ACCESS_TOKEN": "syt_..."
@@ -99,8 +129,10 @@ Add to `openclaw.json`:
   "mcp": {
     "servers": {
       "matrix": {
-        "command": "mcp-server-matrix",
+        "command": "python3",
+        "args": ["-m", "mcp_server_matrix.server"],
         "env": {
+          "PYTHONPATH": "/absolute/path/to/mcp-matrix/src",
           "MATRIX_HOMESERVER": "https://matrix.example.com",
           "MATRIX_USER": "@bot:example.com",
           "MATRIX_PASSWORD": "your-password"
@@ -117,8 +149,9 @@ Add to `openclaw.json`:
 export MATRIX_HOMESERVER=https://matrix.example.com
 export MATRIX_USER=@bot:example.com
 export MATRIX_PASSWORD=your-password
+export PYTHONPATH=$PWD/src
 
-mcp-server-matrix
+python -m mcp_server_matrix.server
 ```
 
 ## Examples
