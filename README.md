@@ -49,6 +49,7 @@ Set environment variables:
 | `MATRIX_STORE_PATH` | No | Path for nio session store (default: `~/.mcp-server-matrix/nio_store/`) |
 | `MATRIX_DEVICE_ID` | No | Device ID to use with `MATRIX_ACCESS_TOKEN` |
 | `MATRIX_DEVICE_NAME` | No | Device name for password logins (default `mcp-server-matrix`) |
+| `MATRIX_TIMEZONE` | No | IANA zone for message times and for dates given without offset (e.g. `Europe/Madrid`; default UTC) |
 | `MCP_LOG_LEVEL` | No | Log level: DEBUG, INFO, WARNING, ERROR (default: INFO) |
 
 \* Provide either `MATRIX_PASSWORD` or `MATRIX_ACCESS_TOKEN`.

@@ -14,6 +14,9 @@ MODULE_CONTRACT:
     - 0.1.0: Initial release — 11 tools for Matrix interaction
     - 0.2.0: Unread tools (list_unread_rooms, read_unread_messages,
              mark_room_read) backed by GET /notifications
+    - 0.4.1: Unread counts from /sync (Synapse's /notifications `read` flag
+             goes stale with threaded receipts); read_unread_messages adds
+             what followed the first unread; edits marked; MATRIX_TIMEZONE
 """
 
 # START_BLOCK_IMPORTS
@@ -27,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 import mcp.types as types
@@ -234,12 +238,27 @@ def _ok(text: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=text)]
 
 
+def _display_timezone() -> ZoneInfo | timezone:
+    """Timezone for message times and naive date inputs (MATRIX_TIMEZONE, default UTC)."""
+    name = os.environ.get("MATRIX_TIMEZONE", "").strip()
+    if not name:
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning("Unknown MATRIX_TIMEZONE %r; using UTC", name)
+        return timezone.utc
+
+
+DISPLAY_TZ = _display_timezone()
+
+
 def _error(msg: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=f"ERROR: {msg}")]
 
 
 def _parse_datetime_input(value: str, label: str) -> tuple[datetime | None, str | None]:
-    """Parse an ISO 8601 or YYYY-MM-DD datetime string as UTC."""
+    """Parse an ISO 8601 or YYYY-MM-DD datetime; naive values are in DISPLAY_TZ."""
     if not isinstance(value, str) or not value.strip():
         return None, f"Invalid {label}: expected an ISO 8601 datetime or YYYY-MM-DD"
 
@@ -257,7 +276,7 @@ def _parse_datetime_input(value: str, label: str) -> tuple[datetime | None, str 
             )
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=DISPLAY_TZ)
 
     return parsed.astimezone(timezone.utc), None
 
@@ -469,11 +488,14 @@ def _format_sender(matrix_id: str) -> str:
     return matrix_id
 
 
+def _format_ts(ts_ms: int) -> str:
+    """Format a Matrix timestamp in DISPLAY_TZ, naming the zone (e.g. CET)."""
+    return datetime.fromtimestamp(ts_ms / 1000, tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
+
+
 def _format_message_line(sender: str, ts_ms: int, body: str) -> str:
     """Format a single message as a readable line."""
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-    time_str = dt.strftime("%Y-%m-%d %H:%M")
-    return f"[{time_str}] {_format_sender(sender)}: {body}"
+    return f"[{_format_ts(ts_ms)}] {_format_sender(sender)}: {body}"
 # END_BLOCK_HELPERS
 
 
@@ -539,11 +561,11 @@ TOOLS = [
                 },
                 "from_date": {
                     "type": "string",
-                    "description": "Lower bound timestamp (ISO 8601 or YYYY-MM-DD)",
+                    "description": "Lower bound timestamp (ISO 8601 or YYYY-MM-DD; without offset, in the server timezone)",
                 },
                 "to_date": {
                     "type": "string",
-                    "description": "Upper bound timestamp (ISO 8601 or YYYY-MM-DD)",
+                    "description": "Upper bound timestamp (ISO 8601 or YYYY-MM-DD; without offset, in the server timezone)",
                 },
             },
             "required": ["room_id"],
@@ -575,11 +597,11 @@ TOOLS = [
                 },
                 "from_date": {
                     "type": "string",
-                    "description": "Only search messages after this date (ISO 8601 or YYYY-MM-DD)",
+                    "description": "Only search messages after this date (ISO 8601 or YYYY-MM-DD; without offset, in the server timezone)",
                 },
                 "to_date": {
                     "type": "string",
-                    "description": "Only search messages before this date (ISO 8601 or YYYY-MM-DD)",
+                    "description": "Only search messages before this date (ISO 8601 or YYYY-MM-DD; without offset, in the server timezone)",
                 },
             },
             "required": ["room_id", "query"],
@@ -881,6 +903,10 @@ async def _paginate_messages(
                 break
 
             body = event.body or ""
+            content = (getattr(event, "source", None) or {}).get("content") or {}
+            new_content = content.get("m.new_content")
+            if (content.get("m.relates_to") or {}).get("rel_type") == "m.replace" and isinstance(new_content, dict):
+                body = f"(edit) {new_content.get('body') or ''}".strip()
             if match_text and match_text not in body.lower():
                 continue
 
@@ -1153,11 +1179,31 @@ async def _send_reaction(client: AsyncClient, args: dict) -> list[types.TextCont
 
 
 # --- unread ---------------------------------------------------------------
-# Unread state comes from GET /notifications: the homeserver evaluates the
-# user's push rules and read receipts, so the `read` flag is authoritative
-# at request time and independent of this client's (filtered) sync cache.
+# How many messages are unread per room comes from /sync, the same counts
+# Element shows. The `read` flag of GET /notifications is not reliable:
+# Synapse compares every notification with one arbitrary receipt of the
+# room, and a stale threaded or private receipt (Element sends m.read with
+# thread_id "main") keeps a room "unread" after mark_room_read. So the
+# counts decide which notifications are unread: the newest N of each room.
 _NOTIFICATIONS_PAGE = 100
 _NOTIFICATIONS_MAX_SCAN = 500
+_CONTEXT_TIMEOUT = 10.0  # seconds per room spent reading what followed the first unread
+
+# A full sync that carries only the per-room unread counts.
+_COUNTS_FILTER = json.dumps(
+    {
+        "room": {
+            "timeline": {"limit": 1},
+            "state": {"types": []},
+            "ephemeral": {"types": []},
+            "account_data": {"types": []},
+            "include_leave": False,
+        },
+        "presence": {"types": []},
+        "account_data": {"types": []},
+    },
+    separators=(",", ":"),
+)
 
 
 async def _matrix_request(
@@ -1191,14 +1237,31 @@ def _is_highlight(notification: dict) -> bool:
     return False
 
 
+async def _unread_counts(client: AsyncClient) -> dict[str, tuple[int, int]]:
+    """Return {room_id: (unread, mentions)} for every room with unread notifications."""
+    data = await _matrix_request(
+        client, "GET", "/sync", params={"filter": _COUNTS_FILTER, "timeout": 0}
+    )
+    counts: dict[str, tuple[int, int]] = {}
+    for room_id, room in ((data.get("rooms") or {}).get("join") or {}).items():
+        unread = room.get("unread_notifications") or {}
+        notifications = int(unread.get("notification_count") or 0)
+        highlights = int(unread.get("highlight_count") or 0)
+        if notifications or highlights:
+            counts[room_id] = (max(notifications, highlights), highlights)
+    return counts
+
+
 async def _unread_notifications(
-    client: AsyncClient, *, only_mentions: bool, room_id: str | None = None
+    client: AsyncClient, wanted: dict[str, int], *, only_mentions: bool
 ) -> tuple[list[dict], bool]:
-    """Return unread notifications (newest first) and whether the scan was cut short."""
+    """Return the newest `wanted[room]` notifications of each room, newest first,
+    and whether the scan stopped before finding all of them."""
+    remaining = {room_id: count for room_id, count in wanted.items() if count > 0}
     unread: list[dict] = []
     scanned = 0
     next_token: str | None = None
-    while scanned < _NOTIFICATIONS_MAX_SCAN:
+    while remaining and scanned < _NOTIFICATIONS_MAX_SCAN:
         page = await _matrix_request(
             client,
             "GET",
@@ -1212,15 +1275,17 @@ async def _unread_notifications(
         items = page.get("notifications") or []
         scanned += len(items)
         for item in items:
-            if item.get("read"):
-                continue
-            if room_id and item.get("room_id") != room_id:
+            room_id = item.get("room_id")
+            if not remaining.get(room_id):
                 continue
             unread.append(item)
+            remaining[room_id] -= 1
+            if not remaining[room_id]:
+                del remaining[room_id]
         next_token = page.get("next_token")
         if not next_token or not items:
             return unread, False
-    return unread, True
+    return unread, bool(remaining)
 
 
 def _notification_text(event: dict) -> str:
@@ -1229,11 +1294,17 @@ def _notification_text(event: dict) -> str:
     if event_type == "m.room.encrypted":
         return "[encrypted message — not readable by this connector]"
     if event_type == "m.room.message":
+        relation = content.get("m.relates_to") or {}
+        if relation.get("rel_type") == "m.replace" and isinstance(content.get("m.new_content"), dict):
+            content = content["m.new_content"]
+            prefix = "(edit) "
+        else:
+            prefix = ""
         body = str(content.get("body") or "").strip()
         msgtype = content.get("msgtype")
         if msgtype in {"m.image", "m.file", "m.video", "m.audio"}:
-            return f"[{msgtype[2:]}] {body}".strip()
-        return body or "[empty message]"
+            return f"{prefix}[{msgtype[2:]}] {body}".strip()
+        return prefix + (body or "[empty message]")
     if event_type == "m.room.member" and content.get("membership") == "invite":
         return "[room invitation]"
     return f"[{event_type}]"
@@ -1253,34 +1324,37 @@ def _bounded_int(args: dict, key: str, default: int, maximum: int) -> int | str:
     return min(value, maximum)
 
 
+def _event_ts(notification: dict) -> int:
+    return int((notification.get("event") or {}).get("origin_server_ts") or notification.get("ts") or 0)
+
+
 async def _list_unread_rooms(client: AsyncClient, args: dict) -> list[types.TextContent]:
     limit = _bounded_int(args, "limit", 20, 100)
     if isinstance(limit, str):
         return _error(limit)
     only_mentions = bool(args.get("only_mentions"))
     await _ensure_synced(client)
-    notifications, truncated = await _unread_notifications(client, only_mentions=only_mentions)
-
-    rooms: dict[str, dict] = {}
-    for item in notifications:
-        entry = rooms.setdefault(item["room_id"], {"unread": 0, "mentions": 0, "last_ts": 0})
-        entry["unread"] += 1
-        entry["mentions"] += 1 if _is_highlight(item) else 0
-        entry["last_ts"] = max(entry["last_ts"], int((item.get("event") or {}).get("origin_server_ts") or item.get("ts") or 0))
-
-    if not rooms:
+    counts = await _unread_counts(client)
+    if only_mentions:
+        counts = {room_id: (mentions, mentions) for room_id, (_, mentions) in counts.items() if mentions}
+    if not counts:
         scope = "unread mentions" if only_mentions else "unread messages"
         return _ok(f"No {scope}.")
 
-    ordered = sorted(rooms.items(), key=lambda pair: pair[1]["last_ts"], reverse=True)
-    total = sum(entry["unread"] for entry in rooms.values())
-    lines = [f"{total} unread in {len(rooms)} rooms (most recent first):"]
-    for room_id, entry in ordered[:limit]:
-        when = datetime.fromtimestamp(entry["last_ts"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-        mentions = f", {entry['mentions']} mentions" if entry["mentions"] else ""
-        lines.append(
-            f"- {await _room_label(client, room_id)} ({room_id}): {entry['unread']} unread{mentions} — last {when}"
-        )
+    notifications, truncated = await _unread_notifications(
+        client, {room_id: unread for room_id, (unread, _) in counts.items()}, only_mentions=only_mentions
+    )
+    last_ts: dict[str, int] = {}
+    for item in notifications:
+        last_ts[item["room_id"]] = max(last_ts.get(item["room_id"], 0), _event_ts(item))
+
+    ordered = sorted(counts.items(), key=lambda pair: last_ts.get(pair[0], 0), reverse=True)
+    total = sum(unread for unread, _ in counts.values())
+    lines = [f"{total} unread in {len(counts)} rooms (most recent first):"]
+    for room_id, (unread, mentions) in ordered[:limit]:
+        mention_text = f", {mentions} mentions" if mentions else ""
+        when = f" — last {_format_ts(last_ts[room_id])}" if room_id in last_ts else ""
+        lines.append(f"- {await _room_label(client, room_id)} ({room_id}): {unread} unread{mention_text}{when}")
     if len(ordered) > limit:
         lines.append(f"... and {len(ordered) - limit} more rooms")
     if truncated:
@@ -1288,39 +1362,63 @@ async def _list_unread_rooms(client: AsyncClient, args: dict) -> list[types.Text
     return _ok("\n".join(lines))
 
 
+async def _messages_since(
+    client: AsyncClient, room_id: str, first: dict, limit: int
+) -> list[tuple[int, str, str, str]]:
+    """Every readable message from the first unread notification to now.
+
+    Notifications only cover what triggered a push (mentions, in rooms set to
+    "mentions only"); the replies that followed matter just as much.
+    """
+    since = datetime.fromtimestamp(_event_ts(first) / 1000, tz=timezone.utc)
+    messages, _, _ = await _paginate_messages(
+        client, room_id, None, limit, since, None, timeout=_CONTEXT_TIMEOUT
+    )
+    return [(m["ts_ms"], m["sender"], m["body"], m["event_id"]) for m in messages]
+
+
 async def _read_unread_messages(client: AsyncClient, args: dict) -> list[types.TextContent]:
     limit = _bounded_int(args, "limit", 50, 200)
     if isinstance(limit, str):
         return _error(limit)
+    only_mentions = bool(args.get("only_mentions"))
     room_id = None
     if args.get("room_id"):
         room_id, resolve_error = await _resolve_room_id_for_read(client, args["room_id"])
         if resolve_error:
             return _error(resolve_error)
     await _ensure_synced(client)
-    notifications, truncated = await _unread_notifications(
-        client, only_mentions=bool(args.get("only_mentions")), room_id=room_id
-    )
+    counts = await _unread_counts(client)
+    wanted = {rid: (mentions if only_mentions else unread) for rid, (unread, mentions) in counts.items()}
+    if room_id:
+        wanted = {room_id: wanted.get(room_id, 0)}
+    notifications, truncated = await _unread_notifications(client, wanted, only_mentions=only_mentions)
     if not notifications:
         return _ok("No unread messages" + (f" in {await _room_label(client, room_id)}." if room_id else "."))
 
-    # Newest `limit` messages, then oldest first within each room.
+    # Newest `limit` notifications decide the rooms; each room then shows
+    # everything said since its first unread notification, oldest first.
     selected = notifications[:limit]
     by_room: dict[str, list[dict]] = {}
     for item in selected:
-        by_room.setdefault(item["room_id"], []).append(item["event"] if isinstance(item.get("event"), dict) else {})
+        by_room.setdefault(item["room_id"], []).append(item)
     lines: list[str] = []
-    for rid, events in by_room.items():
-        events.sort(key=lambda event: event.get("origin_server_ts") or 0)
-        lines.append(f"Room: {await _room_label(client, rid)} ({len(events)} unread)")
-        for event in events:
-            lines.append(
-                _format_message_line(
-                    str(event.get("sender") or "?"),
-                    int(event.get("origin_server_ts") or 0),
-                    _notification_text(event),
+    for rid, items in by_room.items():
+        items.sort(key=_event_ts)
+        entries = await _messages_since(client, rid, items[0], limit)
+        seen = {event_id for *_, event_id in entries}
+        for item in items:  # encrypted messages, invitations: not in the readable history
+            event = item.get("event") if isinstance(item.get("event"), dict) else {}
+            if event.get("event_id") not in seen:
+                entries.append(
+                    (_event_ts(item), str(event.get("sender") or "?"), _notification_text(event), "")
                 )
-            )
+        entries.sort(key=lambda entry: entry[0])
+        lines.append(
+            f"Room: {await _room_label(client, rid)} ({len(items)} unread"
+            + (f", {len(entries)} messages since the first one)" if len(entries) > len(items) else ")")
+        )
+        lines.extend(_format_message_line(sender, ts, text) for ts, sender, text, _ in entries)
         lines.append("")
     if len(notifications) > limit:
         lines.append(f"[{len(notifications) - limit} older unread messages not shown; raise limit to read them]")
