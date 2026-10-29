@@ -3,9 +3,9 @@
   "manifest_version": "0.4",
   "name": "mcp-server-matrix",
   "display_name": "Matrix MCP Server",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "description": "MCP server for Matrix messaging and room management",
-  "long_description": "Interact with Matrix homeservers over stdio MCP. Send and read messages, manage rooms, invite users, resolve aliases, and inspect room state through a single local server.",
+  "long_description": "Interact with Matrix homeservers over stdio MCP. Read, search and send messages, list and search rooms, follow unread conversations and mark them read, react to messages, and inspect room details and members.",
   "author": {
     "name": "Flinq Ingenieria"
   },
@@ -23,13 +23,16 @@
     "entry_point": "src/mcp_server_matrix/server.py",
     "mcp_config": {
       "command": "uv",
-      "args": ["run", "--directory", "${__dirname}", "mcp-server-matrix"],
+      "args": ["run", "--directory", "${__dirname}", "--no-dev", "mcp-server-matrix"],
       "env": {
         "MATRIX_HOMESERVER": "${user_config.matrixHomeserver}",
         "MATRIX_USER": "${user_config.matrixUser}",
         "MATRIX_PASSWORD": "${user_config.matrixPassword}",
         "MATRIX_ACCESS_TOKEN": "${user_config.matrixAccessToken}",
+        "MATRIX_DEVICE_ID": "${user_config.matrixDeviceId}",
+        "MATRIX_DEVICE_NAME": "${user_config.matrixDeviceName}",
         "MATRIX_STORE_PATH": "${user_config.matrixStorePath}",
+        "MATRIX_TIMEZONE": "${user_config.matrixTimezone}",
         "MCP_LOG_LEVEL": "${user_config.mcpLogLevel}"
       }
     }
@@ -50,41 +53,60 @@
     "matrixPassword": {
       "type": "string",
       "title": "Password",
-      "description": "Account password. Provide this or an access token.",
-      "sensitive": true
+      "description": "Account password. Provide this or an access token. The session is saved and reused, so restarts do not create new devices.",
+      "sensitive": true,
+      "default": ""
     },
     "matrixAccessToken": {
       "type": "string",
       "title": "Access token",
       "description": "Account access token. Provide this or a password.",
-      "sensitive": true
+      "sensitive": true,
+      "default": ""
+    },
+    "matrixDeviceId": {
+      "type": "string",
+      "title": "Device ID",
+      "description": "Optional device ID that belongs to the access token.",
+      "default": ""
+    },
+    "matrixDeviceName": {
+      "type": "string",
+      "title": "Device name",
+      "description": "Device name shown in your Matrix sessions after a password login.",
+      "default": "Claude Desktop"
     },
     "matrixStorePath": {
       "type": "directory",
       "title": "Store path",
-      "description": "Optional path for the nio session store.",
-      "default": "${HOME}/.mcp-server-matrix/nio_store"
+      "description": "Optional folder for the nio store and the saved session. Leave empty to use ~/.mcp-server-matrix/nio_store.",
+      "default": ""
+    },
+    "matrixTimezone": {
+      "type": "string",
+      "title": "Time zone",
+      "description": "IANA time zone for message times and for dates given without offset, for example Europe/Madrid. Leave empty for UTC.",
+      "default": ""
     },
     "mcpLogLevel": {
       "type": "string",
       "title": "Log level",
-      "description": "Process log level.",
+      "description": "Process log level: DEBUG, INFO, WARNING or ERROR.",
       "default": "INFO"
     }
   },
   "tools": [
-    {"name": "send_message", "description": "Send a text message to a room."},
-    {"name": "send_html", "description": "Send an HTML-formatted message to a room."},
-    {"name": "read_messages", "description": "Read recent room messages with optional date filters and pagination."},
-    {"name": "list_rooms", "description": "List all joined rooms."},
-    {"name": "get_room_info", "description": "Get room details including name, topic, members, and encryption status."},
-    {"name": "get_room_members", "description": "List joined members with display names and avatars."},
-    {"name": "join_room", "description": "Join a room by ID or alias."},
-    {"name": "leave_room", "description": "Leave a room."},
-    {"name": "create_room", "description": "Create a new room with optional invites."},
-    {"name": "invite_user", "description": "Invite a user to a room."},
-    {"name": "send_reaction", "description": "React to a message with an emoji."},
-    {"name": "resolve_alias", "description": "Resolve a Matrix room alias to a room ID."}
+    {"name": "send_message", "description": "Send a text message to a Matrix room."},
+    {"name": "read_messages", "description": "Read messages from a Matrix room in chronological order."},
+    {"name": "search_messages", "description": "Search for messages containing a keyword or phrase in a room's history."},
+    {"name": "search_rooms", "description": "Search joined Matrix rooms by name, alias, or topic."},
+    {"name": "list_rooms", "description": "List Matrix rooms the user has joined, alphabetically."},
+    {"name": "get_room_info", "description": "Get details about a Matrix room: name, topic, member count, alias."},
+    {"name": "get_room_members", "description": "List the members of a Matrix room."},
+    {"name": "send_reaction", "description": "Send an emoji reaction to a specific message in a Matrix room."},
+    {"name": "list_unread_rooms", "description": "List rooms with unread messages for the user, with unread and mention counts."},
+    {"name": "read_unread_messages", "description": "Read the user's unread Matrix messages, grouped by room, oldest first, as plain text suitable for reading aloud."},
+    {"name": "mark_room_read", "description": "Mark everything in a Matrix room as read for the user (moves the read marker and read receipt to the latest message)."}
   ],
   "compatibility": {
     "platforms": ["darwin", "linux", "win32"],

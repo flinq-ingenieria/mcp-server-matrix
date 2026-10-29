@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Build an MCPB bundle for mcp-server-matrix."""
+"""Build the Claude Desktop .mcpb bundle for mcp-server-matrix.
+
+The bundle carries mcpb/manifest.json plus the project sources. The manifest
+uses server.type "uv": Claude Desktop installs Python and the dependencies
+from pyproject.toml (and uv.lock) itself, so users need nothing preinstalled.
+The bundle version always comes from pyproject.toml.
+
+Usage: python scripts/build_mcpb.py [--out dist/] [-o path/to/file.mcpb]
+"""
 
 from __future__ import annotations
 
@@ -14,10 +22,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SOURCE = ROOT / "mcpb" / "manifest.json"
+ICON = ROOT / "mcpb" / "icon.png"
 PYPROJECT = ROOT / "pyproject.toml"
-DEFAULT_OUTPUT = ROOT / "dist"
 ROOT_FILES = ["README.md", "README.ru.md", "LICENSE"]
-PACKAGE_DIRS = ["src"]
+PACKAGE_PATHS = ["src/mcp_server_matrix"]
+SKIP_DIRS = {"__pycache__", "tests"}
 
 
 def read_pyproject_value(key: str) -> str:
@@ -31,18 +40,15 @@ def read_pyproject_value(key: str) -> str:
 
 def load_manifest() -> dict:
     manifest = json.loads(MANIFEST_SOURCE.read_text(encoding="utf-8"))
-    project_name = read_pyproject_value("name")
-    project_version = read_pyproject_value("version")
+    manifest["version"] = read_pyproject_value("version")
 
-    if manifest.get("name") != project_name:
-        raise ValueError(
-            f"Manifest name {manifest.get('name')!r} does not match pyproject name {project_name!r}"
-        )
-    if manifest.get("version") != project_version:
-        raise ValueError(
-            f"Manifest version {manifest.get('version')!r} does not match pyproject version {project_version!r}"
-        )
-
+    # Claude Desktop leaves "${user_config.x}" verbatim when an optional field
+    # has no value and no default, and the server would get that literal.
+    for key, option in manifest.get("user_config", {}).items():
+        if not option.get("required") and "default" not in option:
+            raise ValueError(f"Optional user_config {key!r} needs a default")
+    if ICON.is_file():
+        manifest["icon"] = "icon.png"
     return manifest
 
 
@@ -53,15 +59,16 @@ def bundle_files() -> list[Path]:
         if path.is_file():
             files.append(path)
 
-    for relpath in PACKAGE_DIRS:
+    for relpath in PACKAGE_PATHS:
         base = ROOT / relpath
-        if not base.exists():
+        if base.is_file():
+            files.append(base)
             continue
         files.extend(
             path
             for path in base.rglob("*")
             if path.is_file()
-            and "__pycache__" not in path.parts
+            and not any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts)
             and path.suffix not in {".pyc", ".pyo"}
         )
 
@@ -73,7 +80,9 @@ def write_bundle(output_path: Path) -> tuple[Path, str]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+        if ICON.is_file():
+            archive.write(ICON, "icon.png")
 
         for file_path in sorted(bundle_files()):
             arcname = file_path.relative_to(ROOT).as_posix()
@@ -85,21 +94,21 @@ def write_bundle(output_path: Path) -> tuple[Path, str]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, default=ROOT / "dist", help="Output directory")
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
-        help="Path to the output .mcpb file",
+        help="Path to the output .mcpb file (overrides --out)",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    project_version = read_pyproject_value("version")
-    project_name = read_pyproject_value("name")
-    output_path = args.output or DEFAULT_OUTPUT / f"{project_name}-{project_version}.mcpb"
+    name = json.loads(MANIFEST_SOURCE.read_text(encoding="utf-8"))["name"]
+    output_path = args.output or args.out / f"{name}-{read_pyproject_value('version')}.mcpb"
     bundle_path, sha256 = write_bundle(output_path)
     print(bundle_path)
     print(sha256)

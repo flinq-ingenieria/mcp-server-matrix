@@ -87,9 +87,8 @@ async def _get_client() -> AsyncClient:
     if not password and not access_token:
         raise EnvironmentError("Set MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN")
 
-    store_path = os.environ.get(
-        "MATRIX_STORE_PATH",
-        str(Path.home() / ".mcp-server-matrix" / "nio_store"),
+    store_path = os.environ.get("MATRIX_STORE_PATH", "").strip() or str(
+        Path.home() / ".mcp-server-matrix" / "nio_store"
     )
     Path(store_path).mkdir(parents=True, exist_ok=True)
 
